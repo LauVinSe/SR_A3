@@ -113,7 +113,11 @@ chmod u+x ~/catkin_ws/src/cave_explorer/src/cave_explorer.py\
 
 ## How to Control the Rover
 - ### Manual Control:
-  You can manually send goals to the rover by clicking the 2D Nav Goal button in RVIZ and selecting a location on the map.
+  You can manually send goals to the rover by clicking the 2D Nav Goal button in RVIZ and selecting a location on the map or using teleop:
+
+  ```bash
+    rosrun teleop_twist_keyboard teleop_twist_keyboard.py
+  ```
 
 - ### Autonomous Mode:
   The rover will autonomously explore the cave and search for artifacts based on the code in cave_explorer.py. The code includes basic decision-making and computer vision functionalities.
