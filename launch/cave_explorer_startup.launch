@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+
+<launch>
+
+  <!-- Parameters -->
+  <param name="/use_sim_time" value="true"/>
+  <arg name="x_pos" default="0.0"/>
+  <arg name="y_pos" default="0.0"/>
+  <arg name="z_pos" default="0.0"/>
+  <arg name="yaw" default="0.0"/>
+  
+  <!-- Gazebo simulator -->
+  <include file="$(find gazebo_ros)/launch/empty_world.launch">
+    <arg name="world_name" value="$(find cave_explorer)/worlds/mars1.world"/>
+    <arg name="paused" value="false"/>
+    <arg name="use_sim_time" value="true"/>
+    <arg name="gui" value="true"/>
+    <arg name="headless" value="false"/>
+    <arg name="debug" value="false"/>
+  </include>
+
+  <!-- Robot details -->
+  <param name="robot_description" command="rosrun xacro xacro --inorder $(find cave_explorer)/urdf/mars_explorer.urdf.xacro" />
+  <node name="spawn_urdf" pkg="gazebo_ros" type="spawn_model" args="-urdf -model mars_explorer -x $(arg x_pos) -y $(arg y_pos) -z $(arg z_pos) -Y $(arg yaw) -param robot_description" /> 
+  
+  <node pkg="robot_state_publisher" type="robot_state_publisher" name="robot_state_publisher">
+    <param name="publish_frequency" type="double" value="50.0" />
+  </node>
+
+  <!-- RVIZ visualisation -->
+  <node pkg="rviz" type="rviz" name="rviz_cave_explorer" args="-d $(find cave_explorer)/config/cave_explorer.rviz" />
+
+</launch>
