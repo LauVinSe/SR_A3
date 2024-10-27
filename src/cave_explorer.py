@@ -59,7 +59,7 @@ class PlannerType(Enum):
     GO_TO_FIRST_ARTIFACT = 3
     RANDOM_WALK = 4
     RANDOM_GOAL = 5
-    # Add more!
+    FRONTIER_EXPLORATION = 6
 
 class CaveExplorer:
     def __init__(self):
@@ -69,7 +69,7 @@ class CaveExplorer:
         self.artifact_found_ = False
 
         # Variables/Flags for planning
-        self.planner_type_ = PlannerType.ERROR
+        self.planner_type_ = PlannerType.FRONTIER_EXPLORATION  # Set to FRONTIER_EXPLORATION
         self.reached_first_artifact_ = False
         self.returned_home_ = False
         self.goal_counter_ = 0  # Unique ID for each goal sent to move_base
@@ -132,6 +132,14 @@ class CaveExplorer:
             'white_ball': {'r': 1.0, 'g': 1.0, 'b': 0.0}     # Yellow
         }
 
+        # Map subscriber
+        self.map_sub_ = rospy.Subscriber('/map', OccupancyGrid, self.map_callback)
+        self.occupancy_grid_ = None
+
+        # Goal commitment variables
+        self.current_goal = None
+        self.goal_reached_threshold = 0.5  # Distance threshold in meters
+
     def get_pose_2d(self):  
 
         # Lookup the latest transform
@@ -179,6 +187,10 @@ class CaveExplorer:
         
         # Return the transformed point (x, y, z)
         return global_point[0:3]
+
+    # Callback to update the occupancy grid map
+    def map_callback(self, map_msg):
+        self.occupancy_grid_ = map_msg
 
     def depth_callback(self, depth_msg):
          # Lock the mutex when accessing the depth image
@@ -229,7 +241,7 @@ class CaveExplorer:
                     class_id = int(result.boxes.cls[i])
                     class_name = result.names[class_id]
 
-                    if depth_value == 0 or np.isnan(depth_value) or depth_value > 4.0 or depth_value < 0.5:
+                    if depth_value == 0 or np.isnan(depth_value) or depth_value > 4.5 or depth_value < 0.5:
                         rospy.logwarn(f"No valid depth at pixel ({x_center}, {y_center}). Artifact out of range.")
                         continue
 
@@ -269,7 +281,7 @@ class CaveExplorer:
         rospy.loginfo('artifact_found_: ' + str(self.artifact_found_))
 
 
-    def process_detection(self, position_3d, current_time, class_name, distance_threshold=3.0):
+    def process_detection(self, position_3d, current_time, class_name, distance_threshold=5.0):
         """
         Process a new detection and update running average of positions
         """
@@ -375,131 +387,63 @@ class CaveExplorer:
         self.marker_array = current_markers
         self.marker_array_pub_.publish(self.marker_array)
 
-    def planner_move_forwards(self, action_state):
-        # Simply move forward by 10m
+    # Frontier-based exploration planner with goal commitment
+    def planner_frontier_exploration(self, action_state):
+        rospy.loginfo("Starting frontier-based exploration...")
 
-        # Only send this once before another action
-        if action_state == actionlib.GoalStatus.LOST:
+        if self.occupancy_grid_ is None:
+            rospy.logwarn("Occupancy grid map is not yet available.")
+            return
 
-            pose_2d = self.get_pose_2d()
+        # If a current goal exists and is not reached, keep moving toward it
+        if self.current_goal and self.get_distance_to_goal(self.current_goal) > self.goal_reached_threshold:
+            rospy.loginfo('Continuing toward the current goal...')
+            return  # Continue without setting a new goal
 
-            rospy.loginfo('Current pose: ' + str(pose_2d.x) + ' ' + str(pose_2d.y) + ' ' + str(pose_2d.theta))
+        # Process the occupancy grid to find frontiers (unexplored borders)
+        grid = np.array(self.occupancy_grid_.data).reshape((self.occupancy_grid_.info.height,
+                                                            self.occupancy_grid_.info.width))
 
-            # Move forward 10m
-            pose_2d.x += 10 * math.cos(pose_2d.theta)
-            pose_2d.y += 10 * math.sin(pose_2d.theta)
+        unexplored = -1
+        free_space = 0
+        frontiers = []
+        safety_distance = 10  # Cells away from an obstacle to be considered safe
 
-            rospy.loginfo('Target pose: ' + str(pose_2d.x) + ' ' + str(pose_2d.y) + ' ' + str(pose_2d.theta))
+       # Precompute a safe mask to determine if a cell is within the safety distance of an obstacle
+        obstacle_mask = (grid > free_space).astype(np.uint8)
+        safety_mask = cv2.dilate(obstacle_mask, np.ones((2 * safety_distance + 1, 2 * safety_distance + 1), np.uint8))
 
-            # Send a goal to "move_base" with "self.move_base_action_client_"
-            action_goal = MoveBaseActionGoal()
-            action_goal.goal.target_pose.header.frame_id = "map"
-            action_goal.goal_id = self.goal_counter_
-            self.goal_counter_ = self.goal_counter_ + 1
-            action_goal.goal.target_pose.pose = pose2d_to_pose(pose_2d)
-
-            rospy.loginfo('Sending goal...')
-            self.move_base_action_client_.send_goal(action_goal.goal)
-
-
-    def planner_go_to_first_artifact(self, action_state):
-        # Go to a pre-specified artifact (alien) location
-
-        # Only send this if not already going to a goal
-        if action_state != actionlib.GoalStatus.ACTIVE:
-
-            # Select a pre-specified goal location
-            pose_2d = Pose2D()
-            pose_2d.x = 18.0
-            pose_2d.y = 25.0
-            pose_2d.theta = -math.pi/2
-
-            # Send a goal to "move_base" with "self.move_base_action_client_"
-            action_goal = MoveBaseActionGoal()
-            action_goal.goal.target_pose.header.frame_id = "map"
-            action_goal.goal_id = self.goal_counter_
-            self.goal_counter_ = self.goal_counter_ + 1
-            action_goal.goal.target_pose.pose = pose2d_to_pose(pose_2d)
-
-            rospy.loginfo('Sending goal...')
-            self.move_base_action_client_.send_goal(action_goal.goal)
+        for x in range(1, grid.shape[0] - 1):
+            for y in range(1, grid.shape[1] - 1):
+                if grid[x, y] == unexplored and safety_mask[x, y] == 0:
+                    neighbors = [grid[x + i, y + j] for i in [-1, 0, 1] for j in [-1, 0, 1] if not (i == 0 and j == 0)]
+                    if free_space in neighbors:
+                        frontiers.append((x, y))
 
 
+        if not frontiers:
+            rospy.logwarn("No frontiers found for exploration.")
+            return
 
-    def planner_return_home(self, action_state):
-        # Go to the origin
+        frontier_goal = random.choice(frontiers)
+        goal_x = frontier_goal[1] * self.occupancy_grid_.info.resolution + self.occupancy_grid_.info.origin.position.x
+        goal_y = frontier_goal[0] * self.occupancy_grid_.info.resolution + self.occupancy_grid_.info.origin.position.y
 
-        # Only send this if not already going to a goal
-        if action_state != actionlib.GoalStatus.ACTIVE:
+        self.current_goal = Pose2D(goal_x, goal_y, random.uniform(0, 2 * math.pi))
 
-            # Select a pre-specified goal location
-            pose_2d = Pose2D()
-            pose_2d.x = 0
-            pose_2d.y = 0
-            pose_2d.theta = 0
+        action_goal = MoveBaseActionGoal()
+        action_goal.goal.target_pose.header.frame_id = "map"
+        action_goal.goal_id = self.goal_counter_
+        self.goal_counter_ += 1
+        action_goal.goal.target_pose.pose = pose2d_to_pose(self.current_goal)
 
-            # Send a goal to "move_base" with "self.move_base_action_client_"
-            action_goal = MoveBaseActionGoal()
-            action_goal.goal.target_pose.header.frame_id = "map"
-            action_goal.goal_id = self.goal_counter_
-            self.goal_counter_ = self.goal_counter_ + 1
-            action_goal.goal.target_pose.pose = pose2d_to_pose(pose_2d)
+        rospy.loginfo('Sending frontier goal...')
+        self.move_base_action_client_.send_goal(action_goal.goal)
 
-            rospy.loginfo('Sending goal...')
-            self.move_base_action_client_.send_goal(action_goal.goal)
-
-    def planner_random_walk(self, action_state):
-        # Go to a random location, which may be invalid
-
-        min_x = -5
-        max_x = 50
-        min_y = -5
-        max_y = 50
-
-        # Only send this if not already going to a goal
-        if action_state != actionlib.GoalStatus.ACTIVE:
-
-            # Select a random location
-            pose_2d = Pose2D()
-            pose_2d.x = random.uniform(min_x, max_x)
-            pose_2d.y = random.uniform(min_y, max_y)
-            pose_2d.theta = random.uniform(0, 2*math.pi)
-
-            # Send a goal to "move_base" with "self.move_base_action_client_"
-            action_goal = MoveBaseActionGoal()
-            action_goal.goal.target_pose.header.frame_id = "map"
-            action_goal.goal_id = self.goal_counter_
-            self.goal_counter_ = self.goal_counter_ + 1
-            action_goal.goal.target_pose.pose = pose2d_to_pose(pose_2d)
-
-            rospy.loginfo('Sending goal...')
-            self.move_base_action_client_.send_goal(action_goal.goal)
-
-    def planner_random_goal(self, action_state):
-        # Go to a random location out of a predefined set
-
-        # Hand picked set of goal locations
-        random_goals = [[53.3,40.7],[44.4, 13.3],[2.3, 33.4],[9.9, 37.3],[3.4, 18.5],[6.0, 0.4],[28.3, 11.8],[43.7, 12.8],[38.9,43.0],[47.4,4.7],[31.5,3.2],[36.6,32.5]]
-
-        # Only send this if not already going to a goal
-        if action_state != actionlib.GoalStatus.ACTIVE:
-
-            # Select a random location
-            idx = random.randint(0,len(random_goals)-1)
-            pose_2d = Pose2D()
-            pose_2d.x = random_goals[idx][0]
-            pose_2d.y = random_goals[idx][1]
-            pose_2d.theta = random.uniform(0, 2*math.pi)
-
-            # Send a goal to "move_base" with "self.move_base_action_client_"
-            action_goal = MoveBaseActionGoal()
-            action_goal.goal.target_pose.header.frame_id = "map"
-            action_goal.goal_id = self.goal_counter_
-            self.goal_counter_ = self.goal_counter_ + 1
-            action_goal.goal.target_pose.pose = pose2d_to_pose(pose_2d)
-
-            rospy.loginfo('Sending goal...')
-            self.move_base_action_client_.send_goal(action_goal.goal)
+    # Calculate distance to the goal
+    def get_distance_to_goal(self, goal):
+        pose = self.get_pose_2d()
+        return math.sqrt((pose.x - goal.x) ** 2 + (pose.y - goal.y) ** 2)
 
     def main_loop(self):
 
@@ -519,19 +463,12 @@ class CaveExplorer:
                 print("Successfully returned home!")
                 self.returned_home_ = True
 
-
-
-
             #######################################################
             # Select the next planner to execute
             # Update this logic as you see fit!
             # self.planner_type_ = PlannerType.MOVE_FORWARDS
             if not self.reached_first_artifact_:
-                self.planner_type_ = PlannerType.GO_TO_FIRST_ARTIFACT
-            elif not self.returned_home_:
-                self.planner_type_ = PlannerType.RETURN_HOME
-            else:
-                self.planner_type_ = PlannerType.RANDOM_GOAL
+                self.planner_type_ = PlannerType.FRONTIER_EXPLORATION
 
 
             #######################################################
@@ -539,16 +476,8 @@ class CaveExplorer:
             # The methods send a goal to "move_base" with "self.move_base_action_client_"
             # Add your own planners here!
             print("Calling planner:", self.planner_type_.name)
-            if self.planner_type_ == PlannerType.MOVE_FORWARDS:
-                self.planner_move_forwards(action_state)
-            elif self.planner_type_ == PlannerType.GO_TO_FIRST_ARTIFACT:
-                self.planner_go_to_first_artifact(action_state)
-            elif self.planner_type_ == PlannerType.RETURN_HOME:
-                self.planner_return_home(action_state)
-            elif self.planner_type_ == PlannerType.RANDOM_WALK:
-                self.planner_random_walk(action_state)
-            elif self.planner_type_ == PlannerType.RANDOM_GOAL:
-                self.planner_random_goal(action_state)
+            if self.planner_type_ == PlannerType.FRONTIER_EXPLORATION:
+                self.planner_frontier_exploration(action_state)
 
 
             #######################################################
