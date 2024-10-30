@@ -60,6 +60,8 @@ class PlannerType(Enum):
     RANDOM_WALK = 4
     RANDOM_GOAL = 5
     FRONTIER_EXPLORATION = 6
+    STOP_AND_WAIT = 7
+    APPROACH_ARTIFACT = 8
 
 class CaveExplorer:
     def __init__(self):
@@ -68,11 +70,23 @@ class CaveExplorer:
         self.localised_ = False
         self.artifact_found_ = False
 
-        # Variables/Flags for planning
+        # Variables/Flags for planning 1
         self.planner_type_ = PlannerType.FRONTIER_EXPLORATION  # Set to FRONTIER_EXPLORATION
         self.reached_first_artifact_ = False
         self.returned_home_ = False
         self.goal_counter_ = 0  # Unique ID for each goal sent to move_base
+
+        # Variables for planning 2
+        self.current_distance_to_artifact = None
+        self.desired_distance_to_artifact = 2.5  # Desired distance to artifact in meters
+        self.distance_for_stop = 40.0  # Distance threshold to stop in meters
+        self.artifact_of_interest_found = False
+        self.close_enough_= False
+        self.image_width_ = 720
+        self.detection_center_x = 0
+        self.inspected_artifacts = []
+        self.ins_next_artifact_id = 0
+        self.stopped_and_centered = False
 
         # Initialise CvBridge
         self.cv_bridge_ = CvBridge()
@@ -158,7 +172,7 @@ class CaveExplorer:
         else: 
             pose.theta = wrap_angle(-2. * math.acos(qw))
 
-        print("pose: ", pose)
+        # print("pose: ", pose)
 
         return pose
     
@@ -218,7 +232,8 @@ class CaveExplorer:
             # depth_image_vis = depth_image_copy.copy()
 
         # Run YOLO inference
-        results = self.model(image, conf=0.75)
+        results = self.model(image, conf=0.75, verbose=False)
+        image_width = image.shape[1]
 
         # Check if objects were detected
         if len(results) > 0 and depth_image_copy is not None:
@@ -241,8 +256,8 @@ class CaveExplorer:
                     class_id = int(result.boxes.cls[i])
                     class_name = result.names[class_id]
 
-                    if depth_value == 0 or np.isnan(depth_value) or depth_value > 4.5 or depth_value < 0.5:
-                        rospy.logwarn(f"No valid depth at pixel ({x_center}, {y_center}). Artifact out of range.")
+                    if depth_value == 0 or np.isnan(depth_value) or depth_value > 4.5 or depth_value < 0.1:
+                        # rospy.logwarn(f"No valid depth at pixel ({x_center}, {y_center}). Artifact out of range.")
                         continue
 
                     position_3d_local = self.pixel_to_3d((x_center, y_center), depth_value)
@@ -256,6 +271,20 @@ class CaveExplorer:
                         marker = self.create_marker(position_3d, artifact_id, class_name, current_time)
                         current_markers.markers.append(marker)
 
+                    if class_name == "alien" or class_name == "white_ball":
+                        # self.artifact_of_interest_found = True
+                        self.detection_center_x = x_center
+                        self.current_distance_to_artifact = depth_value
+                        rospy.loginfo(f"Artifact of interest detected: {class_name}")
+
+                        new_artifact = self.process_inspection(class_name, position_3d)
+
+                        if new_artifact:
+                            rospy.loginfo(f"New artifact of interest detected: {class_name}")
+                            self.artifact_of_interest_found = True
+                        else:
+                            rospy.loginfo(f"Artifact of interest already detected: {class_name}")
+
             # Update and publish the marker array
             self.update_marker_array(current_markers)
         else:
@@ -263,23 +292,50 @@ class CaveExplorer:
             rospy.loginfo("No objects detected")
             annotated_image = image  # If no objects, return the original image
 
-        # # Normalize depth image for visualization
-        # depth_image_vis = cv2.cvtColor(depth_image_vis.astype(np.uint8), cv2.COLOR_GRAY2BGR)  # Convert to BGR format
-
-        # # Concatenate RGB image and depth image side by side
-        # combined_image = cv2.hconcat([annotated_image, depth_image_vis])
-
         # Publish the image with the detection bounding boxes
         image_detection_message = self.cv_bridge_.cv2_to_imgmsg(annotated_image, encoding="rgb8")
         self.image_detections_pub_.publish(image_detection_message)
 
-        # # Display the combined image using OpenCV imshow
-        # cv2.imshow("RGB and Depth Image", combined_image)
-        # cv2.waitKey(1)  # Display the image for 1 ms, adjust delay as needed
+        # rospy.loginfo('image_callback')
+        # rospy.loginfo('artifact_found_: ' + str(self.artifact_found_))
 
-        rospy.loginfo('image_callback')
-        rospy.loginfo('artifact_found_: ' + str(self.artifact_found_))
+    def process_inspection(self, class_name, position_3d):
 
+        position_array = np.array(position_3d)
+
+        # Check for nearby existing artifacts of the same class
+        for artifact in self.inspected_artifacts:
+            if artifact['class_name'] != class_name:
+                continue
+
+            distance = np.linalg.norm(position_array - np.array(artifact['position']))
+            if distance < 5.0:
+                # Update existing artifact with running average
+                inspection_count = artifact['inspection_count']
+                new_average = (
+                    (np.array(artifact['position']) * inspection_count + position_array) /
+                    (inspection_count + 1)
+                )
+
+                artifact.update({
+                    'position': tuple(new_average),
+                    'inspection_count': inspection_count + 1
+                })
+
+                # rospy.loginfo(f"Updated {class_name} artifact {artifact['id']}")
+                return False
+
+        # If no nearby artifact found, create new one
+        new_artifact = {
+            'inspection_id': self.ins_next_artifact_id,
+            'class_name': class_name,
+            'position': position_3d,
+            'inspection_count': 1
+        }
+
+        self.inspected_artifacts.append(new_artifact)
+        self.ins_next_artifact_id += 1
+        return True
 
     def process_detection(self, position_3d, current_time, class_name, distance_threshold=5.0):
         """
@@ -307,7 +363,7 @@ class CaveExplorer:
                     'detection_count': detection_count + 1
                 })
                 
-                rospy.loginfo(f"Updated {class_name} artifact {artifact['id']}")
+                # rospy.loginfo(f"Updated {class_name} artifact {artifact['id']}")
                 return artifact['id']
         
         # If no nearby artifact found, create new one
@@ -389,96 +445,229 @@ class CaveExplorer:
 
     # Frontier-based exploration planner with goal commitment
     def planner_frontier_exploration(self, action_state):
-        rospy.loginfo("Starting frontier-based exploration...")
+        
+        if action_state != actionlib.GoalStatus.ACTIVE:
+            rospy.loginfo("Starting frontier-based exploration...")
 
-        if self.occupancy_grid_ is None:
-            rospy.logwarn("Occupancy grid map is not yet available.")
-            return
+            # Ensure occupancy grid is available
+            if self.occupancy_grid_ is None:
+                rospy.logwarn("Occupancy grid map is not yet available.")
+                return
 
-        # If a current goal exists and is not reached, keep moving toward it
-        if self.current_goal and self.get_distance_to_goal(self.current_goal) > self.goal_reached_threshold:
-            rospy.loginfo('Continuing toward the current goal...')
-            return  # Continue without setting a new goal
+            # Process the occupancy grid to find frontiers (unexplored borders)
+            grid = np.array(self.occupancy_grid_.data).reshape((self.occupancy_grid_.info.height,
+                                                                self.occupancy_grid_.info.width))
 
-        # Process the occupancy grid to find frontiers (unexplored borders)
-        grid = np.array(self.occupancy_grid_.data).reshape((self.occupancy_grid_.info.height,
-                                                            self.occupancy_grid_.info.width))
+            unexplored = -1
+            free_space = 0
+            frontiers = []
+            safety_distance = 10 # Cells away from an obstacle to be considered safe
 
-        unexplored = -1
-        free_space = 0
-        frontiers = []
-        safety_distance = 10  # Cells away from an obstacle to be considered safe
+        # Precompute a safe mask to determine if a cell is within the safety distance of an obstacle
+            obstacle_mask = (grid > free_space).astype(np.uint8)
+            safety_mask = cv2.dilate(obstacle_mask, np.ones((2 * safety_distance + 1, 2 * safety_distance + 1), np.uint8))
 
-       # Precompute a safe mask to determine if a cell is within the safety distance of an obstacle
-        obstacle_mask = (grid > free_space).astype(np.uint8)
-        safety_mask = cv2.dilate(obstacle_mask, np.ones((2 * safety_distance + 1, 2 * safety_distance + 1), np.uint8))
-
-        for x in range(1, grid.shape[0] - 1):
-            for y in range(1, grid.shape[1] - 1):
-                if grid[x, y] == unexplored and safety_mask[x, y] == 0:
-                    neighbors = [grid[x + i, y + j] for i in [-1, 0, 1] for j in [-1, 0, 1] if not (i == 0 and j == 0)]
-                    if free_space in neighbors:
-                        frontiers.append((x, y))
+            for x in range(1, grid.shape[0] - 1):
+                for y in range(1, grid.shape[1] - 1):
+                    if grid[x, y] == unexplored and safety_mask[x, y] == 0:
+                        neighbors = [grid[x + i, y + j] for i in [-1, 0, 1] for j in [-1, 0, 1] if not (i == 0 and j == 0)]
+                        if free_space in neighbors:
+                            frontiers.append((x, y))
 
 
-        if not frontiers:
-            rospy.logwarn("No frontiers found for exploration.")
-            return
+            if not frontiers:
+                rospy.logwarn("No frontiers found for exploration.")
+                self.returned_home_ = True
+                return
 
-        frontier_goal = random.choice(frontiers)
-        goal_x = frontier_goal[1] * self.occupancy_grid_.info.resolution + self.occupancy_grid_.info.origin.position.x
-        goal_y = frontier_goal[0] * self.occupancy_grid_.info.resolution + self.occupancy_grid_.info.origin.position.y
+            frontier_goal = random.choice(frontiers)
+            goal_x = frontier_goal[1] * self.occupancy_grid_.info.resolution + self.occupancy_grid_.info.origin.position.x
+            goal_y = frontier_goal[0] * self.occupancy_grid_.info.resolution + self.occupancy_grid_.info.origin.position.y
 
-        self.current_goal = Pose2D(goal_x, goal_y, random.uniform(0, 2 * math.pi))
+            self.current_goal = Pose2D(goal_x, goal_y, random.uniform(0, 2 * math.pi))
 
-        action_goal = MoveBaseActionGoal()
-        action_goal.goal.target_pose.header.frame_id = "map"
-        action_goal.goal_id = self.goal_counter_
-        self.goal_counter_ += 1
-        action_goal.goal.target_pose.pose = pose2d_to_pose(self.current_goal)
+            action_goal = MoveBaseActionGoal()
+            action_goal.goal.target_pose.header.frame_id = "map"
+            action_goal.goal_id = self.goal_counter_
+            self.goal_counter_ += 1
+            action_goal.goal.target_pose.pose = pose2d_to_pose(self.current_goal)
 
-        rospy.loginfo('Sending frontier goal...')
-        self.move_base_action_client_.send_goal(action_goal.goal)
+            rospy.loginfo('Sending frontier goal...')
+            self.move_base_action_client_.send_goal(action_goal.goal)
 
     # Calculate distance to the goal
     def get_distance_to_goal(self, goal):
         pose = self.get_pose_2d()
         return math.sqrt((pose.x - goal.x) ** 2 + (pose.y - goal.y) ** 2)
 
+    # planner 2
+    def planner_stop_and_wait(self, action_state):
+        self.move_base_action_client_.cancel_all_goals()
+        stop_cmd = Twist()
+        self.cmd_vel_pub_.publish(stop_cmd)
+        rospy.loginfo('Initial stop - Artifact detected')
+
+        # Now, calculate how far off-center the detection is
+        image_center = self.image_width_ / 2
+        center_error = self.detection_center_x - image_center
+        fx = 207.8449  # Focal length in pixels
+        horizontal_fov_rad = 2 * math.atan2(self.image_width_ / 2, fx)
+
+        # Determine if yaw adjustment is necessary
+        turn_adjustment = 0.2 * (center_error / image_center)
+
+        x_tolerance_pixels = 1
+
+        # If the object is already within the tolerance, no need to rotate
+        if abs(center_error) <= x_tolerance_pixels:
+            rospy.loginfo(f'Object is within {x_tolerance_pixels}-pixel tolerance. No adjustment needed.')
+            # Set artifact_of_interest_found to False to indicate centering is complete
+            self.artifact_of_interest_found = False
+            return
+
+        # Calculate the required yaw angle to correct (in radians)
+        angular_error_rad = (center_error / self.image_width_) * horizontal_fov_rad
+        rospy.loginfo(f'Center error: {center_error:.1f} pixels, angular error: {angular_error_rad:.2f} radians')
+
+        # Create a Twist message to rotate the robot by the calculated angular error
+        adjust_cmd = Twist()
+
+        # Apply angular velocity to correct yaw direction (rotate in place)
+        if angular_error_rad < 0:
+            # Rotate left (positive angular.z)
+            adjust_cmd.angular.z = 0.1  # You can tune this value for how fast you want the rotation
+        else:
+            # Rotate right (negative angular.z)
+            adjust_cmd.angular.z = -0.1
+
+        # Control loop
+        rate = rospy.Rate(10)  # 1 Hz control loop
+        rotation_duration = abs(angular_error_rad) / abs(adjust_cmd.angular.z)  # Time to rotate by the calculated angular error
+
+        # Rotate for the calculated duration
+        start_time = rospy.Time.now().to_sec()
+        while rospy.Time.now().to_sec() - start_time < rotation_duration:
+            # Check if the artifact is still visible
+            if self.detection_center_x is None:
+                rospy.logwarn('Artifact lost during rotation.')
+                self.cmd_vel_pub_.publish(Twist())  # Stop the robot immediately
+                return  # Exit the function as the artifact is lost
+
+            # Publish the twist message to rotate the robot
+            self.cmd_vel_pub_.publish(adjust_cmd)
+
+            # Log the adjustment being made
+            rospy.loginfo(f'Adjusting yaw... Center error: {center_error:.1f} pixels')
+
+            # Update the center error based on the latest detection
+            center_error = self.detection_center_x - image_center
+
+            # If the object is now within tolerance, break early
+            if abs(center_error) <= x_tolerance_pixels:
+                rospy.loginfo('Object centered, stopping rotation.')
+                break
+
+            rate.sleep()
+
+        # After yaw is corrected, stop the robot again
+        self.cmd_vel_pub_.publish(Twist())  # Publish zero velocity to stop
+
+        # Set artifact_of_interest_found to False to allow transitioning back to exploration
+        self.artifact_of_interest_found = False
+        self.stopped_and_centered = True
+        rospy.loginfo('Finished centering, transitioning back to APPROACH_ARTIFACT.')
+
+    def planner_approach_artifact(self, action_state):
+
+        if action_state != actionlib.GoalStatus.ACTIVE:
+            rospy.loginfo("Starting approach to artifact...")
+            self.move_base_action_client_.cancel_all_goals()
+
+            if self.current_distance_to_artifact <= self.desired_distance_to_artifact:
+                rospy.loginfo('Reached desired size - Ready to stop completely')
+
+                # Stop the robot by publishing zero velocity
+                stop_cmd = Twist()
+                stop_cmd.linear.x = 0.0
+                stop_cmd.angular.z = 0.0
+                self.cmd_vel_pub_.publish(stop_cmd)
+
+                # Set close_enough_ to True to indicate the robot is close enough to the artifact
+                self.stopped_and_centered = False
+                self.close_enough_ = True
+                self.current_distance_to_artifact = 0.0
+                return
+
+            # If we're still far from the artifact, move forward
+            else:
+                # Create a Twist message to move the robot forward
+                move_cmd = Twist()
+                move_cmd.linear.x = 0.25  # Set forward speed (adjust this value as needed)
+                move_cmd.angular.z = 0.0  # No rotation, moving straight forward
+
+                # Publish the Twist message to move forward
+                self.cmd_vel_pub_.publish(move_cmd)
+                rospy.loginfo(f'Moving forward... Current distance: {self.current_distance_to_artifact}, Desired distance: {self.desired_distance_to_artifact}')
+
+    def planner_return_home(self, action_state):
+        # Go to the origin
+
+        # Only send this if not already going to a goal
+        if action_state != actionlib.GoalStatus.ACTIVE:
+
+            # Select a pre-specified goal location
+            pose_2d = Pose2D()
+            pose_2d.x = 0
+            pose_2d.y = 0
+            pose_2d.theta = 0
+
+            # Send a goal to "move_base" with "self.move_base_action_client_"
+            action_goal = MoveBaseActionGoal()
+            action_goal.goal.target_pose.header.frame_id = "map"
+            action_goal.goal_id = self.goal_counter_
+            self.goal_counter_ = self.goal_counter_ + 1
+            action_goal.goal.target_pose.pose = pose2d_to_pose(pose_2d)
+
+            rospy.loginfo('Sending goal...')
+            self.move_base_action_client_.send_goal(action_goal.goal)
+
     def main_loop(self):
 
         while not rospy.is_shutdown():
-
             #######################################################
             # Get the current status
-            # See the possible statuses here: https://docs.ros.org/en/noetic/api/actionlib_msgs/html/msg/GoalStatus.html
             action_state = self.move_base_action_client_.get_state()
             rospy.loginfo('action state: ' + self.move_base_action_client_.get_goal_status_text())
             rospy.loginfo('action_state number:' + str(action_state))
 
-            if (self.planner_type_ == PlannerType.GO_TO_FIRST_ARTIFACT) and (action_state == actionlib.GoalStatus.SUCCEEDED):
-                print("Successfully reached first artifact!")
-                self.reached_first_artifact_ = True
-            if (self.planner_type_ == PlannerType.RETURN_HOME) and (action_state == actionlib.GoalStatus.SUCCEEDED):
-                print("Successfully returned home!")
-                self.returned_home_ = True
-
             #######################################################
             # Select the next planner to execute
-            # Update this logic as you see fit!
-            # self.planner_type_ = PlannerType.MOVE_FORWARDS
-            if not self.reached_first_artifact_:
+            if self.artifact_of_interest_found:
+                self.planner_type_ = PlannerType.STOP_AND_WAIT
+            elif self.stopped_and_centered:
+                self.planner_type_ = PlannerType.APPROACH_ARTIFACT
+                if self.close_enough_:
+                    self.close_enough_ = False
+            elif self.returned_home_:
+                self.planner_type_ = PlannerType.RETURN_HOME
+            else:
+                # If moving back to FRONTIER_EXPLORATION, ensure any previous goals are canceled
+                if action_state == actionlib.GoalStatus.PREEMPTED or action_state == actionlib.GoalStatus.ABORTED:
+                    rospy.loginfo("Canceling previous goal to reset action client.")
+                    self.move_base_action_client_.cancel_all_goals()
                 self.planner_type_ = PlannerType.FRONTIER_EXPLORATION
-
 
             #######################################################
             # Execute the planner by calling the relevant method
-            # The methods send a goal to "move_base" with "self.move_base_action_client_"
-            # Add your own planners here!
-            print("Calling planner:", self.planner_type_.name)
+            rospy.loginfo("Executing planner: " + self.planner_type_.name)
             if self.planner_type_ == PlannerType.FRONTIER_EXPLORATION:
                 self.planner_frontier_exploration(action_state)
-
+            elif self.planner_type_ == PlannerType.STOP_AND_WAIT:
+                self.planner_stop_and_wait(action_state)
+            elif self.planner_type_ == PlannerType.APPROACH_ARTIFACT:
+                self.planner_approach_artifact(action_state)
+            elif self.planner_type_ == PlannerType.RETURN_HOME:
+                self.planner_return_home(action_state)
 
             #######################################################
             # Delay so the loop doesn't run too fast

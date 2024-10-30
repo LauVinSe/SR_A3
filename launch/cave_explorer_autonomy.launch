@@ -8,7 +8,7 @@
   <!-- Cave explorer autonomy -->
   <node pkg="cave_explorer" type="cave_explorer.py" respawn="false" name="cave_explorer" output="screen">
     <!-- <param name="computer_vision_model_filename" type="string" value="$(find cave_explorer)/config/stop_data.xml"/> -->
-    <param name="model_path" value="/home/vincent/git/SR_A3/config/model_6.pt" />
+    <param name="model_path" value="/home/vincent/git/SR_A3/config/model_4.pt" />
   </node>
 
 </launch>
