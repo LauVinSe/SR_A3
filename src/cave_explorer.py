@@ -244,7 +244,7 @@ class CaveExplorer:
             current_markers = MarkerArray()
 
             # Annotate the image with bounding boxes
-            annotated_image = results[0].plot()  # Annotate with bounding boxes
+            annotated_image = results[0].plot() 
 
             for result in results:
                 for i, bbox in enumerate(result.boxes.xyxy):
@@ -271,7 +271,7 @@ class CaveExplorer:
                         marker = self.create_marker(position_3d, artifact_id, class_name, current_time)
                         current_markers.markers.append(marker)
 
-                    if class_name == "alien" or class_name == "white_ball":
+                    if class_name == "alien" or class_name == "mushroom":
                         # self.artifact_of_interest_found = True
                         self.detection_center_x = x_center
                         self.current_distance_to_artifact = depth_value
@@ -339,7 +339,7 @@ class CaveExplorer:
 
     def process_detection(self, position_3d, current_time, class_name, distance_threshold=5.0):
         """
-        Process a new detection and update running average of positions
+        Process a new detection and update positions
         """
         position_array = np.array(position_3d)
         
@@ -418,7 +418,7 @@ class CaveExplorer:
         marker.scale.z = 0.3
 
         # Set color based on class
-        color = self.class_colors.get(class_name, {'r': 0.5, 'g': 0.5, 'b': 0.5})  # Default gray if class not found
+        color = self.class_colors.get(class_name, {'r': 0.5, 'g': 0.5, 'b': 0.5})
         marker.color.r = color['r']
         marker.color.g = color['g']
         marker.color.b = color['b']
@@ -499,6 +499,50 @@ class CaveExplorer:
     def get_distance_to_goal(self, goal):
         pose = self.get_pose_2d()
         return math.sqrt((pose.x - goal.x) ** 2 + (pose.y - goal.y) ** 2)
+
+    # Advanced 2: Exploration for visual coverage
+        # Ensure all areas are covered by camera detections
+        # Adjust exploration strategy to maximize visual coverage and allow full area observation.
+    # def advanced_coverage_exploration(self):
+        #     # Scan entire grid and identify regions that haven’t been observed by the camera.
+        #     unobserved_areas = []
+        #     for x in range(grid.shape[0]):
+        #         for y in range(grid.shape[1]):
+        #             if not self.is_area_observed(x, y):
+        #                 unobserved_areas.append((x, y))
+        #
+        #     # Select the nearest unobserved area as the next exploration goal
+        #     if unobserved_areas:
+        #         nearest_unobserved_area = self.find_nearest_unobserved_area(unobserved_areas)
+        #
+        #         goal_x = nearest_unobserved_area[1] * self.occupancy_grid_.info.resolution + self.occupancy_grid_.info.origin.position.x
+        #         goal_y = nearest_unobserved_area[0] * self.occupancy_grid_.info.resolution + self.occupancy_grid_.info.origin.position.y
+        #
+        #         # Set the goal to navigate to the unobserved area
+        #         self.current_goal = Pose2D(goal_x, goal_y, random.uniform(0, 2 * math.pi))
+        #         action_goal = MoveBaseActionGoal()
+        #         action_goal.goal.target_pose.header.frame_id = "map"
+        #         action_goal.goal_id = self.goal_counter_
+        #         self.goal_counter_ += 1
+        #         action_goal.goal.target_pose.pose = pose2d_to_pose(self.current_goal)
+        #
+        #         rospy.loginfo('Sending visual coverage goal for unobserved area...')
+        #         self.move_base_action_client_.send_goal(action_goal.goal)
+        #     else:
+        #         rospy.loginfo('All areas have been visually covered.')
+        #
+        # def is_area_observed(self, x, y):
+        #     # Check if the cell has been observed by the camera
+        #     return self.observation_map[x, y] == 1  # Assuming a binary observation map where 1 indicates observed
+        #
+        # def find_nearest_unobserved_area(self, unobserved_areas):
+        #     # Compute the distance to each unobserved area and return the closest
+        #     current_position = self.get_pose_2d()
+        #     distances = [math.sqrt((x - current_position.x) ** 2 + (y - current_position.y) ** 2) for x, y in unobserved_areas]
+        #     nearest_index = distances.index(min(distances))
+    
+        #     return unobserved_areas[nearest_index]
+
 
     # planner 2
     def planner_stop_and_wait(self, action_state):
@@ -640,7 +684,7 @@ class CaveExplorer:
             rospy.loginfo('action state: ' + self.move_base_action_client_.get_goal_status_text())
             rospy.loginfo('action_state number:' + str(action_state))
 
-            #######################################################
+            # #######################################################
             # Select the next planner to execute
             if self.artifact_of_interest_found:
                 self.planner_type_ = PlannerType.STOP_AND_WAIT
@@ -657,7 +701,7 @@ class CaveExplorer:
                     self.move_base_action_client_.cancel_all_goals()
                 self.planner_type_ = PlannerType.FRONTIER_EXPLORATION
 
-            #######################################################
+            # #######################################################
             # Execute the planner by calling the relevant method
             rospy.loginfo("Executing planner: " + self.planner_type_.name)
             if self.planner_type_ == PlannerType.FRONTIER_EXPLORATION:
